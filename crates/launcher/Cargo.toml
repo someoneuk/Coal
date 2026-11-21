@@ -3,11 +3,13 @@ name = "launcher"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "coal_launcher"
+path = "src/lib.rs"
+
 [[bin]]
 name = "executor-ui"
 path = "src/main.rs"
 
 [dependencies]
-eframe = "0.37"
-rfd = "0.18"
-sysinfo = "0.40"
+coal-shared = { path = "../shared" }

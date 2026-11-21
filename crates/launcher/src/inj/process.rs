@@ -1,4 +1,9 @@
-use sysinfo::{ProcessesToUpdate, System};
+use std::ffi::CStr;
+
+use crate::win32::{
+    CloseHandle, CreateToolhelp32Snapshot, Process32First, Process32Next, HANDLE,
+    PROCESSENTRY32A, TH32CS_SNAPPROCESS,
+};
 
 #[derive(Debug, Clone)]
 pub struct ProcessInfo {
@@ -13,28 +18,41 @@ pub fn find_process(target: &str) -> Option<ProcessInfo> {
         return None;
     }
 
-    let Ok(mut system) = System::new() else {
-        return None;
-    };
-    system.refresh_processes(ProcessesToUpdate::All, true);
-
-    let mut best: Option<ProcessInfo> = None;
-    for (pid, process) in system.processes() {
-        let name = process.name().to_string_lossy().into_owned();
-        if normalize(&name) == needle {
-            let info = ProcessInfo {
-                pid: pid.as_u32(),
-                name,
-            };
-            // Prefer the lowest PID for deterministic behaviour.
-            if best.as_ref().map(|b| info.pid < b.pid).unwrap_or(true) {
-                best = Some(info);
-            }
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot.is_null() || snapshot == usize::MAX as HANDLE {
+            return None;
         }
+
+        let mut entry: PROCESSENTRY32A = std::mem::zeroed();
+        entry.dw_size = std::mem::size_of::<PROCESSENTRY32A>() as u32;
+
+        let mut ok = Process32First(snapshot, &mut entry);
+        let mut best: Option<ProcessInfo> = None;
+        while ok != 0 {
+            let name = CStr::from_ptr(entry.sz_exe_file.as_ptr())
+                .to_string_lossy()
+                .into_owned();
+            if normalize(&name) == needle {
+                let info = ProcessInfo {
+                    pid: entry.th32_process_id,
+                    name,
+                };
+                // Prefer the lowest PID for deterministic behaviour.
+                if best.as_ref().map(|b| info.pid < b.pid).unwrap_or(true) {
+                    best = Some(info);
+                }
+            }
+            ok = Process32Next(snapshot, &mut entry);
+        }
+
+        CloseHandle(snapshot);
+        best
     }
-    best
 }
 
 fn normalize(name: &str) -> String {
-    name.trim().trim_end_matches(".exe").to_ascii_lowercase()
+    name.trim()
+        .trim_end_matches(".exe")
+        .to_ascii_lowercase()
 }

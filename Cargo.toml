@@ -1,14 +1,12 @@
 [workspace]
-members = ["crates/launcher", "crates/runtime"]
+members = ["crates/shared", "crates/launcher", "crates/runtime"]
 resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 
-# Light, release-oriented defaults for both the launcher and the injected library.
+# Favor fast incremental/release builds over maximum runtime optimization.
 [profile.release]
-opt-level = 3
-lto = "thin"
-codegen-units = 1
+opt-level = 2
 strip = true
