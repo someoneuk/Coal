@@ -94,6 +94,28 @@ This injects `runtime.dll` into a temporary Notepad process, runs `return 40 + 2
 - Framing is a 4-byte little-endian length followed by UTF-8 bytes. Responses are prefixed `OK\n` or `ERR\n`. The launcher connects by target PID, so no discovery or configuration is needed.
 - Scripts run on the IPC thread inside the embedded VM. They are sandboxed to that VM — they do not yet touch the target game's own Lua state.
 
+## Injection methods and Roblox
+
+The launcher's **Inject** button uses the stock `CreateRemoteThread` route. The codebase also contains experimental alternatives used by `examples/probe.rs`:
+
+| Method | Switch | Result on ordinary processes | Result on Roblox (current build) |
+| --- | --- | --- | --- |
+| `CreateRemoteThread` | default | works | thread exits with `STATUS_INVALID_THREAD` (`0xC000071C`) |
+| `NtCreateThreadEx` | `--nt` | works | same `STATUS_INVALID_THREAD` |
+| APC queue | `--apc` | works | never fires (no alertable thread) |
+| Thread hijack (one thread) | `--hijack` | works | DLL does not load |
+| Thread hijack (all threads) | `--hijack-all` | works | avoid — can hang the target |
+
+Roblox's anti-cheat blocks these user-mode routes. The launcher now verifies the module is actually present after injection, so it reports failure instead of claiming success. `LoadLibraryA` itself is not hooked in the target — the rejection happens at thread creation / module-load level.
+
+Getting a real internal executor against Roblox requires a different loader (e.g. manual mapping of the PE with relocation/import processing, then executing the entry point through a hijacked thread) and is version-specific. The embedded Lua VM and IPC in this repo already work end-to-end; the missing piece is that loader.
+
+`examples/probe.rs` usage:
+
+```powershell
+cargo run --release -p launcher --example probe -- <pid> [--nt | --apc | --hijack | --hijack-all | --ll]
+```
+
 ## Where to extend
 
 - `crates/runtime/src/vm.rs` — expose native bindings, seed the environment, or bridge into the game's own Lua state.
