@@ -62,70 +62,8 @@ mod win {
         pub fn GetLastError() -> DWORD;
     }
 
-    pub type LPCSTR = *const c_char;
-    #[repr(C)]
-    pub struct LUID {
-        pub low_part: u32,
-        pub high_part: i32,
-    }
-    #[repr(C)]
-    pub struct TOKEN_PRIVILEGES {
-        pub count: u32,
-        pub luid: LUID,
-        pub attributes: u32,
-    }
-
-    #[link(name = "advapi32")]
-    extern "system" {
-        pub fn OpenProcessToken(process: HANDLE, access: DWORD, token: *mut HANDLE) -> BOOL;
-        pub fn LookupPrivilegeValueA(system: LPCSTR, name: LPCSTR, luid: *mut LUID) -> BOOL;
-        pub fn AdjustTokenPrivileges(
-            token: HANDLE,
-            disable_all: BOOL,
-            new_state: *const TOKEN_PRIVILEGES,
-            buffer_len: DWORD,
-            previous: *mut TOKEN_PRIVILEGES,
-            return_len: *mut DWORD,
-        ) -> BOOL;
-    }
 }
 use win::*;
-
-fn enable_debug_privilege() {
-    unsafe {
-        let mut token: HANDLE = std::ptr::null_mut();
-        if OpenProcessToken(
-            (-1isize) as HANDLE, // GetCurrentProcess
-            0x0002 | 0x0008,     // TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY
-            &mut token,
-        ) == 0
-        {
-            return;
-        }
-        let mut luid: LUID = std::mem::zeroed();
-        let found = LookupPrivilegeValueA(
-            std::ptr::null(),
-            c"SeDebugPrivilege".as_ptr(),
-            &mut luid,
-        ) != 0;
-        if found {
-            let mut privileges = TOKEN_PRIVILEGES {
-                count: 1,
-                luid,
-                attributes: 0x0002, // SE_PRIVILEGE_ENABLED
-            };
-            AdjustTokenPrivileges(
-                token,
-                0,
-                &privileges,
-                std::mem::size_of::<TOKEN_PRIVILEGES>() as DWORD,
-                &mut privileges,
-                &mut 0u32,
-            );
-        }
-        CloseHandle(token);
-    }
-}
 
 const PROCESS_QUERY_INFORMATION: DWORD = 0x0400;
 const PROCESS_VM_READ: DWORD = 0x0010;
