@@ -143,6 +143,17 @@ The supplied reference is the Solara V3 client. What its files reveal:
 
 The actual Hyperion bypass lives in the packed `.cmdsoft` section of `SolaraV3.dll`; there is no readable source for it, so it cannot be copied from these files. The useful takeaways are the architecture (UI bridge + token, local HTTP routes, per-client manager), the Luau runtime, and the CFG whitelisting clue.
 
+## Live-memory analysis of the running reference
+
+With Solara running and injected (green light), I dumped both processes from an elevated session using `ReadProcessMemory` (tooling in `crates/launcher/examples/dumper.rs` and temp PowerShell scripts). Findings:
+
+- **Bridge protocol recovered from Solara's heap**: a request body of `{"script":"<luau source>","client_id":"<pid>"}` posted to `/execute_script`. Client status is reported as `{"<pid>":{"username":...,"thumb":...,"status":1}}`. The bridge is token-protected — unauthenticated requests get `401`, and the token was not recoverable from static strings (it is generated per session and lives in the UI process).
+- **Execution mechanism exposed by Solara's own debug log**: it hooks Roblox's task scheduler — log lines include `TASKSCHEDULER.GETYOUNGESTJOB`, `Youngest job found, delta = ...`, and `JOB.CONSTRUCTOR` with DataModel/job addresses. Scripts are dispatched through that hook rather than a standalone Lua state.
+- **Roblox self-protection confirmed**: `ReadProcessMemory` on `RobloxPlayerBeta.dll` fails with `ERROR_PARTIAL_COPY` (299) — Hyperion denies reads of its own image. No injected module and no RWX regions were visible, consistent with hidden/manual-mapped code and VAD unlinking.
+- **Solara is JIT-unpacked**: the in-memory `SolaraV3.dll` differs from the on-disk file by only 0.04% in `.text` and 0% in `.cmdsoft` at rest; the real code is decrypted on demand, so a static memory dump does not expose it.
+
+The practical takeaway: reverse-engineering the bypass from this binary requires an actual debugger breakpoint at injection time, not passive dumps. The learnable, usable parts are the bridge JSON schema and the task-scheduler hook design.
+
 ## Where to extend
 
 - `crates/runtime/src/vm.rs` — expose native bindings, seed the environment, or bridge into the game's own Lua state.
