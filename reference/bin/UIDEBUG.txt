@@ -1,0 +1,4 @@
+﻿[2026-11-22 08:38:58]: Created new exit signal.
+[2026-11-22 08:38:58]: Solara's DLL returned bridge port 56617.
+[2026-11-22 08:38:58]: Bridge HTTP client configured for http://127.0.0.1:56617/
+[2026-11-22 08:38:59]: Checking Legacy Solara Tabs!

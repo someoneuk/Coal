@@ -21,6 +21,54 @@ use crate::inj::inject::InjectResult;
 extern "system" {
     fn LoadLibraryA(name: LPCSTR) -> HMODULE;
     fn GetProcAddress(module: HMODULE, name: LPCSTR) -> FARPROC;
+    fn GetModuleHandleA(name: LPCSTR) -> HMODULE;
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CfgCallTargetInfo {
+    offset: usize,
+    flags: usize,
+}
+
+const CF_CALL_TARGET_VALID: usize = 1;
+
+/// Mark the mapped image as valid CFG call targets. Reference executors call
+/// this before transferring execution into a manually mapped region.
+type SetValidTargetsFn = unsafe extern "system" fn(
+    HANDLE,
+    LPVOID,
+    usize,
+    u32,
+    *const CfgCallTargetInfo,
+) -> i32;
+
+unsafe fn mark_cfg_valid(process: HANDLE, base: LPVOID, size: usize) -> bool {
+    let kernel32 = GetModuleHandleA(c"kernel32.dll".as_ptr());
+    if kernel32.is_null() {
+        return false;
+    }
+    let Some(address) = GetProcAddress(kernel32, c"SetProcessValidCallTargets".as_ptr()) else {
+        return false;
+    };
+    let function: SetValidTargetsFn = std::mem::transmute(address);
+
+    let mut page = 0usize;
+    let mut entries: Vec<CfgCallTargetInfo> = Vec::new();
+    while page < size {
+        entries.push(CfgCallTargetInfo {
+            offset: page,
+            flags: CF_CALL_TARGET_VALID,
+        });
+        page += 0x1000;
+    }
+    function(
+        process,
+        base,
+        size,
+        entries.len() as u32,
+        entries.as_ptr(),
+    ) != 0
 }
 
 const IMAGE_DIRECTORY_ENTRY_IMPORT: usize = 1;
@@ -320,6 +368,9 @@ pub fn manual_map(pid: u32, dll_path: &Path) -> Result<InjectResult, String> {
             VirtualFreeEx(process, target_base, 0, MEM_RELEASE);
             return Err(format!("WriteProcessMemory failed ({})", GetLastError()));
         }
+
+        let cfg_ok = mark_cfg_valid(process, target_base, info.size_of_image);
+        eprintln!("[manual] CFG whitelist: {cfg_ok}");
 
         hijack_execute_table(process, pid, table)?;
 

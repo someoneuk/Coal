@@ -131,6 +131,18 @@ The embedded Lua VM and IPC remain verified end-to-end; the loader is the open p
 cargo run --release -p launcher --example probe -- <pid> [--nt | --apc | --hijack | --hijack-all | --ll]
 ```
 
+## Reference executor analysis (`reference/`)
+
+The supplied reference is the Solara V3 client. What its files reveal:
+
+- `Solara.exe` — WPF UI (Wpf.Ui + WebView2 hosting a Monaco editor). It has a bridge port/token, `ExecuteScriptAsync`, a multi-client manager that scans Roblox instances, a ScriptHub backed by scriptblox.com, and an experimental "Fix ROBLOX version by replacing the ROBLOX protocol" action.
+- `SolaraV3.dll` — native x64 C++ core, ~18 MB, exporting only `SetEventSink` and `Start`. It embeds the Luau compiler/bytecode pipeline, a Crow HTTP server, ixwebsocket, nlohmann JSON, and curl/OpenSSL. Its local HTTP routes include `/execute_script`, `/state`, `/client_manager`, `/request`, `/DLI`, `/SG_`, plus a randomized route.
+- The engine exposes the familiar exploit globals: `getreg`, `getgenv`, `getfenv`/`setfenv`, `getscriptbytecode`, `getscripthash`, `firesignal`, `clearqueueonteleport`, `getcustomasset`, `setreadonly`, `setscriptable`, `getthreadidentity`/`setthreadidentity`, `readinteger`/`readbuffer`/`writeinteger`, `setclipboard`, `gethwid`, and `request`.
+- It imports `SetProcessValidCallTargets`, which confirms CFG call-target whitelisting is part of the real approach. I added that call to `manual.rs`; on a normal process it returns false and does not fix the mapper crash, so it is not a complete solution on its own.
+- `bin/ALGA` (token/hash), `bin/DLCTBL_FRTS` (encoded table), `bin/version.txt` (`3.293`); `SLaunch.exe` is a WinHTTP bootstrapper.
+
+The actual Hyperion bypass lives in the packed `.cmdsoft` section of `SolaraV3.dll`; there is no readable source for it, so it cannot be copied from these files. The useful takeaways are the architecture (UI bridge + token, local HTTP routes, per-client manager), the Luau runtime, and the CFG whitelisting clue.
+
 ## Where to extend
 
 - `crates/runtime/src/vm.rs` — expose native bindings, seed the environment, or bridge into the game's own Lua state.
