@@ -9,7 +9,7 @@ use std::time::Duration;
 use coal_shared::ipc::Pipe;
 
 #[allow(non_camel_case_types)]
-mod win {
+pub(crate) mod win {
     use super::*;
 
     pub type HANDLE = *mut c_void;
@@ -132,15 +132,15 @@ mod win {
 
 use win::*;
 
-const PROCESS_CREATE_THREAD: DWORD = 0x0002;
-const PROCESS_QUERY_INFORMATION: DWORD = 0x0400;
-const PROCESS_VM_OPERATION: DWORD = 0x0008;
-const PROCESS_VM_WRITE: DWORD = 0x0020;
-const PROCESS_VM_READ: DWORD = 0x0010;
-const MEM_COMMIT: DWORD = 0x1000;
-const MEM_RESERVE: DWORD = 0x2000;
-const MEM_RELEASE: DWORD = 0x8000;
-const PAGE_READWRITE: DWORD = 0x04;
+pub(crate) const PROCESS_CREATE_THREAD: DWORD = 0x0002;
+pub(crate) const PROCESS_QUERY_INFORMATION: DWORD = 0x0400;
+pub(crate) const PROCESS_VM_OPERATION: DWORD = 0x0008;
+pub(crate) const PROCESS_VM_WRITE: DWORD = 0x0020;
+pub(crate) const PROCESS_VM_READ: DWORD = 0x0010;
+pub(crate) const MEM_COMMIT: DWORD = 0x1000;
+pub(crate) const MEM_RESERVE: DWORD = 0x2000;
+pub(crate) const MEM_RELEASE: DWORD = 0x8000;
+pub(crate) const PAGE_READWRITE: DWORD = 0x04;
 const INFINITE: DWORD = 0xFFFF_FFFF;
 const WAIT_OBJECT_0: DWORD = 0;
 const TH32CS_SNAPTHREAD: DWORD = 0x0000_0004;
@@ -148,10 +148,11 @@ const TH32CS_SNAPMODULE: DWORD = 0x0000_0008;
 const THREAD_SET_CONTEXT: DWORD = 0x0010;
 const THREAD_GET_CONTEXT: DWORD = 0x0008;
 const THREAD_SUSPEND_RESUME: DWORD = 0x0002;
-const PAGE_EXECUTE_READWRITE: DWORD = 0x40;
+pub(crate) const PAGE_EXECUTE_READWRITE: DWORD = 0x40;
 const CONTEXT_FULL: u32 = 0x0010_000B;
 const CONTEXT_FLAGS_OFFSET: usize = 0x30;
 const CONTEXT_RIP_OFFSET: usize = 0xF8;
+const CONTEXT_RCX_OFFSET: usize = 0x80;
 
 #[repr(C, align(16))]
 struct ThreadContext([u8; 1232]);
@@ -162,7 +163,7 @@ pub struct InjectResult {
     pub module_base: u32,
 }
 
-struct HandleGuard(HANDLE);
+pub(crate) struct HandleGuard(pub HANDLE);
 impl Drop for HandleGuard {
     fn drop(&mut self) {
         unsafe {
@@ -704,6 +705,125 @@ pub fn inject_dll_hijack(pid: u32, dll_path: &Path) -> Result<InjectResult, Stri
             thread::sleep(Duration::from_millis(100));
         }
         Err("runtime did not start in the target — the load was blocked".into())
+    }
+}
+
+/// Execute a table of 3-argument calls inside the target by hijacking one
+/// thread. Each table entry is 32 bytes: [fn_ptr, arg1, arg2, arg3], ending
+/// with a zero fn_ptr. `table` must already be mapped in the target.
+pub(crate) fn hijack_execute_table(process: HANDLE, pid: u32, table: LPVOID) -> Result<(), String> {
+    use win::*;
+
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if snapshot.is_null() || snapshot == usize::MAX as HANDLE {
+            return Err(format!("CreateToolhelp32Snapshot failed ({})", GetLastError()));
+        }
+        let _snapshot = HandleGuard(snapshot);
+
+        let mut entry: THREADENTRY32 = std::mem::zeroed();
+        entry.dw_size = std::mem::size_of::<THREADENTRY32>() as DWORD;
+        let mut ok = Thread32First(snapshot, &mut entry);
+        let mut chosen = 0u32;
+        while ok != 0 {
+            if entry.th32_owner_process_id == pid {
+                chosen = entry.th32_thread_id;
+                break;
+            }
+            ok = Thread32Next(snapshot, &mut entry);
+        }
+        if chosen == 0 {
+            return Err("no threads found in target".into());
+        }
+
+        let thread = OpenThread(
+            THREAD_SET_CONTEXT | THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME,
+            0,
+            chosen,
+        );
+        if thread.is_null() {
+            return Err(format!("OpenThread failed ({})", GetLastError()));
+        }
+        let _thread = HandleGuard(thread);
+
+        if SuspendThread(thread) == u32::MAX {
+            return Err(format!("SuspendThread failed ({})", GetLastError()));
+        }
+
+        let mut context: ThreadContext = std::mem::zeroed();
+        *(context.0.as_mut_ptr().add(CONTEXT_FLAGS_OFFSET) as *mut u32) = CONTEXT_FULL;
+        if GetThreadContext(thread, context.0.as_mut_ptr() as LPVOID) == 0 {
+            ResumeThread(thread);
+            return Err(format!("GetThreadContext failed ({})", GetLastError()));
+        }
+        let original_rip = *(context.0.as_ptr().add(CONTEXT_RIP_OFFSET) as *const u64);
+
+        let region = VirtualAllocEx(
+            process,
+            std::ptr::null_mut(),
+            256,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_EXECUTE_READWRITE,
+        );
+        if region.is_null() {
+            ResumeThread(thread);
+            return Err(format!("VirtualAllocEx failed ({})", GetLastError()));
+        }
+
+        let stub: Vec<u8> = vec![
+            0x50, 0x51, 0x52, // push rax, rcx, rdx
+            0x41, 0x50, 0x41, 0x51, 0x41, 0x52, 0x41, 0x53, // push r8..r11
+            0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, // push r12..r15
+            0x55, 0x9C, // push rbp, pushfq
+            0x48, 0x89, 0xE5, // mov rbp, rsp
+            0x49, 0x89, 0xCF, // mov r15, rcx  (call table)
+            0x48, 0x83, 0xE4, 0xF0, // and rsp, -16
+            0x48, 0x83, 0xEC, 0x20, // sub rsp, 0x20
+            // loop:
+            0x49, 0x83, 0x3F, 0x00, // cmp qword [r15], 0
+            0x74, 0x18, // je +0x18 -> done
+            0x49, 0x8B, 0x4F, 0x08, // mov rcx, [r15+8]
+            0x49, 0x8B, 0x57, 0x10, // mov rdx, [r15+0x10]
+            0x49, 0x8B, 0x47, 0x18, // mov r8, [r15+0x18]
+            0x49, 0x8B, 0x17, // mov r10, [r15]
+            0x41, 0xFF, 0xD2, // call r10
+            0x49, 0x83, 0xC7, 0x20, // add r15, 0x20
+            0xEB, 0xE6, // jmp loop
+            // done:
+            0x48, 0x83, 0xC4, 0x20, // add rsp, 0x20
+            0x48, 0x89, 0xEC, // mov rsp, rbp
+            0x9D, // popfq
+            0x5D, // pop rbp
+            0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, // pop r15..r12
+            0x41, 0x5B, 0x41, 0x5A, 0x41, 0x59, 0x41, 0x58, // pop r11..r8
+            0x5A, 0x59, 0x58, // pop rdx, rcx, rax
+            0xFF, 0x25, 0x00, 0x00, 0x00, 0x00, // jmp [rip]
+        ]
+        .into_iter()
+        .chain(original_rip.to_le_bytes())
+        .collect();
+
+        let mut written = 0usize;
+        let wrote = WriteProcessMemory(
+            process,
+            region,
+            stub.as_ptr() as *const c_void,
+            stub.len(),
+            &mut written,
+        ) != 0;
+
+        *(context.0.as_mut_ptr().add(CONTEXT_RIP_OFFSET) as *mut u64) = region as u64;
+        *(context.0.as_mut_ptr().add(CONTEXT_RCX_OFFSET) as *mut u64) = table as u64;
+        let set = wrote && SetThreadContext(thread, context.0.as_mut_ptr() as LPVOID) != 0;
+
+        if !set {
+            VirtualFreeEx(process, region, 0, MEM_RELEASE);
+            ResumeThread(thread);
+            return Err("could not install the remote call stub".into());
+        }
+        // Code and table stay allocated: the resumed thread still needs them.
+        ResumeThread(thread);
+        Ok(())
     }
 }
 

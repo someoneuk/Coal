@@ -94,6 +94,7 @@ unsafe extern "system" fn worker(_param: *mut c_void) -> u32 {
 pub extern "system" fn DllMain(module: *mut c_void, reason: u32, _reserved: *mut c_void) -> i32 {
     match reason {
         DLL_PROCESS_ATTACH => unsafe {
+            log_line("[runtime] DllMain attach");
             DisableThreadLibraryCalls(module);
             CreateThread(
                 std::ptr::null_mut(),

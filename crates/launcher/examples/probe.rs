@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use coal_launcher::inj::{
     inject_dll, inject_dll_apc, inject_dll_hijack, inject_dll_hijack_all, inject_dll_nt,
-    load_library_bytes,
+    load_library_bytes, manual_map,
 };
 use coal_shared::ipc::{self, Response};
 
@@ -34,11 +34,14 @@ fn main() {
     let use_apc = std::env::args().any(|arg| arg == "--apc");
     let use_hijack = std::env::args().any(|arg| arg == "--hijack");
     let use_hijack_all = std::env::args().any(|arg| arg == "--hijack-all");
+    let use_manual = std::env::args().any(|arg| arg == "--manual");
     println!(
-        "dll: {} (nt={use_nt}, apc={use_apc}, hijack={use_hijack}, all={use_hijack_all})",
+        "dll: {} (nt={use_nt}, apc={use_apc}, hijack={use_hijack}, all={use_hijack_all}, manual={use_manual})",
         dll.display()
     );
-    let injected = if use_hijack_all {
+    let injected = if use_manual {
+        manual_map(pid, &dll)
+    } else if use_hijack_all {
         inject_dll_hijack_all(pid, &dll)
     } else if use_hijack {
         inject_dll_hijack(pid, &dll)

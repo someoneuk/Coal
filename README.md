@@ -108,7 +108,22 @@ The launcher's **Inject** button uses the stock `CreateRemoteThread` route. The 
 
 Roblox's anti-cheat blocks these user-mode routes. The launcher now verifies the module is actually present after injection, so it reports failure instead of claiming success. `LoadLibraryA` itself is not hooked in the target — the rejection happens at thread creation / module-load level.
 
-Getting a real internal executor against Roblox requires a different loader (e.g. manual mapping of the PE with relocation/import processing, then executing the entry point through a hijacked thread) and is version-specific. The embedded Lua VM and IPC in this repo already work end-to-end; the missing piece is that loader.
+## Research notes: Hyperion and loaders
+
+I researched current public material (RMMInject, Hyperion analysis write-ups, offset indexes, manual-mapping references). The important findings:
+
+- Hyperion encrypts Roblox's `.text` and decrypts it JIT, and maintains a page-integrity whitelist keyed by a hash of each page. Pages that aren't whitelisted are rejected. That is why `LoadLibrary` remote threads, `NtCreateThreadEx`, APC, and context hijack all fail here even though they work on ordinary processes.
+- The public working approach ([RMMInject](https://github.com/Deccatron/RMMInject)) doesn't create a thread. It hooks `ntdll!NtQuerySystemInformation` in the target by patching the target jump in its syscall stub. When Roblox calls that API, a self-contained detour runs **inside** the target and:
+  1. inserts the detour page and the mapped DLL's pages into Hyperion's whitelist set using `insert_set` and the set pointer from `RobloxPlayerBeta.dll`;
+  2. applies base relocations;
+  3. resolves imports with the target's own `GetModuleHandleA`/`LoadLibraryA`/`GetProcAddress`;
+  4. runs TLS callbacks and `DllMain`;
+  5. restores the hook.
+- The three values that make this work — `kPageHash`, `Offset_InsertSet`, and `Offset_WhitelistedPages` — are version-specific. Published values are for `version-1e91b4133e334c9c`; this machine runs `version-2c6fd5e09aaf4cfa`. They must be rediscovered per build (IDA/reversing) or obtained from a current offset index. Several "auto-updated offset" repositories turned out to be low-quality or non-substantive, so I did not bake unverified numbers into the injector.
+
+I implemented the generic half of that pipeline in `crates/launcher/src/inj/manual.rs`: PE parsing, section mapping, base relocations, import resolution, TLS callback discovery, and a remote call-table stub driven through a hijacked thread. It is exposed only through `probe --manual`, **not** the GUI, because it is not reliable yet: invoking a Rust/MSVC DLL entry point without the real loader's setup still crashes ordinary targets. A production fix needs either import/TLS execution through the target's own loader (as RMMInject does) or a DLL built to tolerate manual mapping, plus the per-version Hyperion offsets.
+
+The embedded Lua VM and IPC remain verified end-to-end; the loader is the open piece.
 
 `examples/probe.rs` usage:
 
